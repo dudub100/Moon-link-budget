@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lunar PtP Link Planner</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 0; display: flex; height: 100vh; background: #f4f4f9; }
+        #sidebar { width: 350px; padding: 20px; background: white; box-shadow: 2px 0 5px rgba(0,0,0,0.1); overflow-y: auto; z-index: 1000; }
+        #map { flex-grow: 1; height: 100%; background: #000; }
+        h2 { font-size: 1.2rem; margin-top: 0; color: #333; }
+        .form-group { margin-bottom: 12px; }
+        label { display: block; font-size: 0.85rem; font-weight: bold; margin-bottom: 4px; color: #555; }
+        input { width: 100%; padding: 8px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+        .results { margin-top: 20px; padding: 15px; background: #eef2f5; border-radius: 6px; border: 1px solid #cdd5df; }
+        .results p { margin: 8px 0; font-size: 0.9rem; color: #222; }
+        .results span { font-weight: bold; color: #0056b3; }
+        .instructions { font-size: 0.85rem; color: #666; margin-bottom: 15px; }
+        button { width: 100%; padding: 10px; background: #0056b3; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #004494; }
+    </style>
+</head>
+<body>
+
+    <div id="sidebar">
+        <h2>Lunar Link Parameters</h2>
+        <p class="instructions">Click twice on the map to set Site A and Site B.</p>
+        
+        <div class="form-group"><label>Frequency (GHz)</label><input type="number" id="freq" value="60" step="0.1"></div>
+        <div class="form-group"><label>Tx Power (dBm)</label><input type="number" id="txPower" value="20"></div>
+        <div class="form-group"><label>Tx Antenna Gain (dBi)</label><input type="number" id="txGain" value="35"></div>
+        <div class="form-group"><label>Rx Antenna Gain (dBi)</label><input type="number" id="rxGain" value="35"></div>
+        <div class="form-group"><label>Channel BW (MHz)</label><input type="number" id="bw" value="500"></div>
+        <div class="form-group"><label>Rx Noise Figure (dB)</label><input type="number" id="nf" value="5"></div>
+        
+        <button onclick="clearMap()">Reset Map / Points</button>
+
+        <div class="results" id="results" style="display:none;">
+            <h3>Link Geometry</h3>
+            <p>Distance: <span id="outDist">-</span> km</p>
+            <p>Max Moon Bulge: <span id="outBulge">-</span> m</p>
+            <p>1st Fresnel Radius: <span id="outFresnel">-</span> m</p>
+            <p>Req. Min Antenna Height: <span id="outHeight">-</span> m</p>
+            
+            <h3 style="margin-top: 15px;">RF Budget</h3>
+            <p>Free Space Path Loss: <span id="outFspl">-</span> dB</p>
+            <p>Received Power: <span id="outRx">-</span> dBm</p>
+            <p>Noise Floor: <span id="outNoise">-</span> dBm</p>
+            <p>Raw SNR: <span id="outSnr">-</span> dB</p>
+            
+            <h3 style="margin-top: 15px;">Capacity Threshold</h3>
+            <p>Assumed Gap (QAM + Imp): <span>3.4 dB</span></p>
+            <p>Effective SNR limit: <span id="outEffSnr">-</span> dB</p>
+            <p>Max Shannon Capacity: <span id="outCap">-</span> Mbps</p>
+        </div>
+    </div>
+
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        // Use a generic Moon tile layer (CartoDB Moon Base)
+        const map = L.map('map', {
+            center: [0, 0],
+            zoom: 4,
+            maxZoom: 10
+        });
+
+        L.tileLayer('https://cartocdn-gmaps-a.global.ssl.fastly.net/base-moon/{z}/{x}/{y}.png', {
+            attribution: 'Map data &copy; NASA/OpenPlanetary',
+            noWrap: true
+        }).addTo(map);
+
+        let markers = [];
+        let polyline = null;
+        const R_MOON = 1737.4; // Moon radius in km
+
+        // Custom Haversine using Moon Radius
+        function getMoonDistance(lat1, lon1, lat2, lon2) {
+            const dLat = (lat2 - lat1) * Math.PI / 180;
+            const dLon = (lon2 - lon1) * Math.PI / 180;
+            const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                      Math.sin(dLon/2) * Math.sin(dLon/2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            return R_MOON * c;
+        }
+
+        map.on('click', function(e) {
+            if (markers.length < 2) {
+                const marker = L.marker(e.latlng).addTo(map);
+                markers.push(marker);
+
+                if (markers.length === 2) {
+                    polyline = L.polyline([markers[0].getLatLng(), markers[1].getLatLng()], {color: 'cyan'}).addTo(map);
+                    calculateBudget();
+                }
+            }
+        });
+
+        function clearMap() {
+            markers.forEach(m => map.removeLayer(m));
+            if (polyline) map.removeLayer(polyline);
+            markers = [];
+            polyline = null;
+            document.getElementById('results').style.display = 'none';
+        }
+
+        // Bind auto-recalc to input fields
+        const inputs = ['freq', 'txPower', 'txGain', 'rxGain', 'bw', 'nf'];
+        inputs.forEach(id => {
+            document.getElementById(id).addEventListener('input', () => {
+                if(markers.length === 2) calculateBudget();
+            });
+        });
+
+        function calculateBudget() {
+            const freq = parseFloat(document.getElementById('freq').value);
+            const txP = parseFloat(document.getElementById('txPower').value);
+            const txG = parseFloat(document.getElementById('txGain').value);
+            const rxG = parseFloat(document.getElementById('rxGain').value);
+            const bw = parseFloat(document.getElementById('bw').value);
+            const nf = parseFloat(document.getElementById('nf').value);
+
+            const p1 = markers[0].getLatLng();
+            const p2 = markers[1].getLatLng();
+            
+            // 1. Geography & LoS
+            const d_km = getMoonDistance(p1.lat, p1.lng, p2.lat, p2.lng);
+            
+            // Moon Bulge at midpoint (h = d^2 / (8 * R))
+            const bulge_km = Math.pow(d_km, 2) / (8 * R_MOON);
+            const bulge_m = bulge_km * 1000;
+            
+            // 1st Fresnel zone at midpoint
+            const fresnel_m = 17.32 * Math.sqrt(d_km / (4 * freq));
+            
+            // Required minimum antenna height for clear LoS + Fresnel
+            const minHeight = bulge_m + fresnel_m;
+
+            // 2. RF Budget (FSPL only)
+            const fspl = 20 * Math.log10(d_km) + 20 * Math.log10(freq) + 92.45;
+            const rxPower = txP + txG + rxG - fspl;
+            
+            const noiseFloor = -174 + 10 * Math.log10(bw * 1000000) + nf;
+            const snr = rxPower - noiseFloor;
+
+            // 3. Shannon Capacity Limit
+            const gap = 1.4 + 2.0; // QAM Shape + Implementation Gap
+            const effSnr = snr - gap;
+            
+            let capacity_mbps = 0;
+            if (effSnr > -10) { // Rough cutoff floor
+                const effSnrLinear = Math.pow(10, effSnr / 10);
+                // C = B * log2(1 + S/N)
+                const capacity = (bw * 1000000) * Math.log2(1 + effSnrLinear);
+                capacity_mbps = capacity / 1000000;
+            }
+
+            // Update UI
+            document.getElementById('results').style.display = 'block';
+            document.getElementById('outDist').innerText = d_km.toFixed(2);
+            document.getElementById('outBulge').innerText = bulge_m.toFixed(2);
+            document.getElementById('outFresnel').innerText = fresnel_m.toFixed(2);
+            document.getElementById('outHeight').innerText = minHeight.toFixed(2);
+            
+            document.getElementById('outFspl').innerText = fspl.toFixed(2);
+            document.getElementById('outRx').innerText = rxPower.toFixed(2);
+            document.getElementById('outNoise').innerText = noiseFloor.toFixed(2);
+            document.getElementById('outSnr').innerText = snr.toFixed(2);
+            
+            document.getElementById('outEffSnr').innerText = effSnr.toFixed(2);
+            document.getElementById('outCap').innerText = capacity_mbps.toFixed(2);
+        }
+    </script>
+</body>
+</html>

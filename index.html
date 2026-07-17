@@ -67,10 +67,12 @@
             maxZoom: 10
         });
 
-        L.tileLayer('https://cartocdn-gmaps-a.global.ssl.fastly.net/base-moon/{z}/{x}/{y}.png', {
-            attribution: 'Map data &copy; NASA/OpenPlanetary',
-            noWrap: true
+        L.tileLayer('https://cartocdn-gusc.global.ssl.fastly.net/opmbuilder/api/v1/map/named/opm-moon-basemap-v0-1/all/{z}/{x}/{y}.png', {
+            attribution: 'Map data &copy; <a href="https://openplanetary.org">OpenPlanetary</a> | NASA',
+            noWrap: true,
+            maxZoom: 10
         }).addTo(map);
+
 
         let markers = [];
         let polyline = null;
